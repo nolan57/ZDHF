@@ -1,0 +1,25 @@
+{
+    "configurations": [
+        {
+            "name": "Mac",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/opt/homebrew/opt/opencv/include/opencv4",
+                "/opt/homebrew/opt/opencv/include/opencv4/opencv2",
+                "/Volumes/TOSHIBAEXT/Qt/6.8.0/macos/include",
+                "/Volumes/TOSHIBAEXT/Qt/6.8.0/macos/lib/QtCore.framework/Headers",
+                "/Volumes/TOSHIBAEXT/Qt/6.8.0/macos/lib/QtGui.framework/Headers",
+                "/Volumes/TOSHIBAEXT/Qt/6.8.0/macos/lib/QtWidgets.framework/Headers"
+            ],
+            "defines": [],
+            "macFrameworkPath": [
+                "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks"
+            ],
+            "compilerPath": "/usr/bin/clang++",
+            "cStandard": "c17",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "macos-clang-arm64"
+        }
+    ],
+    "version": 4
+}
