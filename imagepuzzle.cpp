@@ -70,7 +70,7 @@ ImagePuzzle::ImagePuzzle(QWidget *parent) : QMainWindow(parent) {
         "   border: 1px solid palette(highlight);"
         "}"
     );
-    nInput->setValidator(new QIntValidator(2, 10, this));
+    nInput->setValidator(new QIntValidator(2, 10000, this));
     toolbarLayout->addWidget(nInput);
 
     // 开始按钮
@@ -103,14 +103,13 @@ ImagePuzzle::ImagePuzzle(QWidget *parent) : QMainWindow(parent) {
     QHBoxLayout *contentLayout = new QHBoxLayout(contentWidget);
 
     // 左侧区域：显示分割后的图片
-    leftArea = new QWidget(this);
-    leftArea->setAcceptDrops(false);
+    leftArea = new DropWidget(this);
     leftArea->setStyleSheet("background: palette(window);");
     leftLayout = new QGridLayout(leftArea);
     contentLayout->addWidget(leftArea, 1);
 
     // 右侧区域：用于重组图片
-    rightArea = new QLabel(this);
+    rightArea = new DropLabel(this);
     rightArea->setAlignment(Qt::AlignCenter);
     rightArea->setStyleSheet(
         "QLabel {"
@@ -118,7 +117,6 @@ ImagePuzzle::ImagePuzzle(QWidget *parent) : QMainWindow(parent) {
         "   border: 2px dashed palette(dark);"
         "}"
     );
-    rightArea->setAcceptDrops(true);
     contentLayout->addWidget(rightArea, 1);
 
     // 设置主布局
@@ -146,10 +144,27 @@ void ImagePuzzle::dropEvent(QDropEvent *event) {
         QPoint position;
         dataStream >> pixmap >> position;
 
-        if (checkPlacement(position, event->pos())) {
-            updateRightArea(pixmap, position);
-            event->acceptProposedAction();
-        }
+        // 获取放置位置
+        QPoint dropPos = event->position().toPoint();
+        
+        // 创建新的标签显示拼图块
+        QLabel *pieceLabel = new QLabel(rightArea);
+        pieceLabel->setPixmap(pixmap);
+        pieceLabel->setStyleSheet("background: transparent; border: none;");
+        
+        // 保存原始位置信息
+        pieceLabel->setProperty("originalCol", position.x());
+        pieceLabel->setProperty("originalRow", position.y());
+
+        pieceLabel->move(dropPos - QPoint(pixmap.width()/2, pixmap.height()/2));
+        pieceLabel->setAttribute(Qt::WA_DeleteOnClose);
+        pieceLabel->installEventFilter(this);
+        pieceLabel->show();
+
+        event->acceptProposedAction();
+
+        // 检查是否完成拼图
+        checkCompletion();
     }
 }
 
@@ -175,8 +190,22 @@ void ImagePuzzle::startPuzzle() {
 
     // 获取切割数量
     int n = nInput->text().toInt();
-    if (n <= 0) {
+    if (n <= 2) {
         QMessageBox::warning(this, "错误", "请输入有效的切割数量");
+        return;
+    }
+
+    // 计算分割后每块图片的大小
+    double pieceWidth = (double)originalImage.cols / n;
+    double pieceHeight = (double)originalImage.rows / n;
+    
+    // 检查分割后的图片是否太小
+    if (pieceWidth < 10 || pieceHeight < 10) {
+        QMessageBox::warning(this, "错误", 
+            QString("分割数过大！分割后图片尺寸将小于10像素\n当前图片尺寸: %1x%2\n最大允许分割数: %3")
+            .arg(originalImage.cols)
+            .arg(originalImage.rows)
+            .arg(std::min(originalImage.cols / 10, originalImage.rows / 10)));
         return;
     }
 
@@ -193,6 +222,10 @@ void ImagePuzzle::startPuzzle() {
     
     // 设置右侧区域的固定大小
     rightArea->setFixedSize(rightAreaWidth, rightAreaHeight);
+
+    // 保存网格大小，供其他函数使用
+    gridCellWidth = rightAreaWidth / n;
+    gridCellHeight = rightAreaHeight / n;
 
     // 创建工具对象并切割图片
     Tools tools;
@@ -223,7 +256,19 @@ void ImagePuzzle::clearPuzzle() {
 }
 
 void ImagePuzzle::showPieces() {
-    std::random_shuffle(pieces.begin(), pieces.end());
+    // 清除现有的拼图块
+    QLayoutItem *child;
+    while ((child = leftLayout->takeAt(0)) != nullptr) {
+        delete child->widget();
+        delete child;
+    }
+
+    // 随机打乱拼图块的顺序
+    auto rng = QRandomGenerator::global();
+    for (int i = pieces.size() - 1; i > 0; --i) {
+        int j = rng->bounded(i + 1);
+        std::swap(pieces[i], pieces[j]);
+    }
 
     // 计算每个piece的尺寸
     int pieceWidth = leftArea->width() / 3;
@@ -255,14 +300,64 @@ void ImagePuzzle::showPieces() {
         pieceLabel->setPixmap(pixmap);
         pieceLabel->setGeometry(x, y, pieceWidth, pieceHeight);
         pieceLabel->setStyleSheet("background: transparent; border: none;");
-        // 保存原始的行列位置
-        pieceLabel->setProperty("originalRow", piece.location.row);
+        
+        // 保存原始位置信息
         pieceLabel->setProperty("originalCol", piece.location.col);
+        pieceLabel->setProperty("originalRow", piece.location.row);
 
+        // 确保图片完整显示
+        pieceLabel->setScaledContents(true);
+
+        // 安装事件过滤器以处理拖放
         pieceLabel->setAttribute(Qt::WA_DeleteOnClose);
         pieceLabel->installEventFilter(this);
         pieceLabel->show();
     }
+}
+
+bool ImagePuzzle::checkPlacement(const QPoint &actual) {
+    // 确保拖放位置在rightArea内
+    QPoint localPos = rightArea->mapFrom(this, actual);
+    if (!rightArea->rect().contains(localPos)) {
+        return false;
+    }
+
+    return true;
+}
+
+bool ImagePuzzle::checkCompletion() {
+    // 获取所有拼图块
+    QList<QLabel*> pieces = rightArea->findChildren<QLabel*>();
+    if (pieces.isEmpty()) return false;
+
+    bool completed = true;
+    
+    // 允许的误差范围（像素）
+    const int tolerance = 10;
+
+    for (QLabel* piece : pieces) {
+        // 获取当前位置
+        QPoint currentPos = piece->pos();
+        
+        // 获取原始位置
+        int originalCol = piece->property("originalCol").toInt();
+        int originalRow = piece->property("originalRow").toInt();
+        
+        // 计算期望位置
+        QPoint expectedPos(originalCol * gridCellWidth, originalRow * gridCellHeight);
+        
+        // 检查位置是否在允许的误差范围内
+        if (abs(currentPos.x() - expectedPos.x()) > tolerance || 
+            abs(currentPos.y() - expectedPos.y()) > tolerance) {
+            completed = false;
+            break;
+        }
+    }
+
+    if (completed) {
+        QMessageBox::information(this, "恭喜", "拼图完成！");
+    }
+    return completed;
 }
 
 bool ImagePuzzle::eventFilter(QObject *obj, QEvent *event) {
@@ -271,7 +366,14 @@ bool ImagePuzzle::eventFilter(QObject *obj, QEvent *event) {
         if (!child)
             return false;
 
-        QPixmap pixmap = child->pixmap(Qt::ReturnByValue);
+        QPixmap pixmap;
+        // 如果是从右侧区域拖动，使用保存的原始大小图片
+        if (child->parent() == rightArea && child->property("originalPixmap").isValid()) {
+            pixmap = child->property("originalPixmap").value<QPixmap>();
+        } else {
+            pixmap = child->pixmap(Qt::ReturnByValue);
+        }
+
         // 获取原始的行列位置
         QPoint originalPos(child->property("originalCol").toInt(),
                          child->property("originalRow").toInt());
@@ -282,6 +384,8 @@ bool ImagePuzzle::eventFilter(QObject *obj, QEvent *event) {
 
         QMimeData *mimeData = new QMimeData;
         mimeData->setData("application/x-puzzle-piece", itemData);
+        // 存储原始QLabel的指针，以便在左侧区域放下时更新其位置
+        mimeData->setProperty("sourceLabel", QVariant::fromValue((qintptr)child));
 
         QDrag *drag = new QDrag(this);
         drag->setMimeData(mimeData);
@@ -292,7 +396,9 @@ bool ImagePuzzle::eventFilter(QObject *obj, QEvent *event) {
         // 在开始拖动时立即隐藏原始图片
         child->hide();
         
-        if (drag->exec(Qt::MoveAction) == Qt::MoveAction) {
+        Qt::DropAction dropAction = drag->exec(Qt::MoveAction);
+        if (dropAction == Qt::MoveAction) {
+            // 拖放成功，删除原图片
             child->close();
         } else {
             // 如果拖动取消，则重新显示原始图片
@@ -300,74 +406,12 @@ bool ImagePuzzle::eventFilter(QObject *obj, QEvent *event) {
         }
         
         return true;
-    }
-    return QWidget::eventFilter(obj, event);
-}
-
-bool ImagePuzzle::checkPlacement(const QPoint &expected, const QPoint &actual) {
-    // 确保拖放位置在rightArea内
-    QPoint localPos = rightArea->mapFrom(this, actual);
-    if (!rightArea->rect().contains(localPos)) {
-        return false;
-    }
-
-    // 使用nInput的值计算网格大小
-    int gridSize = nInput->text().toInt();
-    int cellWidth = rightArea->width() / gridSize;
-    int cellHeight = rightArea->height() / gridSize;
-
-    // 计算放置的网格位置
-    int gridX = localPos.x() / cellWidth;
-    int gridY = localPos.y() / cellHeight;
-
-    // 确保在网格范围内
-    if (gridX >= 0 && gridX < gridSize && gridY >= 0 && gridY < gridSize) {
-        // 将网格位置存储在rightArea中
-        rightArea->setProperty("dropGridX", gridX);
-        rightArea->setProperty("dropGridY", gridY);
-        return true;
-    }
-    return false;
-}
-
-void ImagePuzzle::updateRightArea(const QPixmap &pixmap, const QPoint &originalPos) {
-    QPixmap currentPixmap = rightArea->pixmap(Qt::ReturnByValue);
-    if (currentPixmap.isNull()) {
-        // 创建与原图相同宽高比的pixmap
-        currentPixmap = QPixmap(rightArea->width(), rightArea->height());
-        currentPixmap.fill(Qt::transparent);
-    }
-
-    // 从rightArea获取实际的网格位置
-    int dropX = rightArea->property("dropGridX").toInt();
-    int dropY = rightArea->property("dropGridY").toInt();
-    
-    // 使用nInput的值计算网格大小
-    int gridSize = nInput->text().toInt();
-    int pieceWidth = rightArea->width() / gridSize;
-    int pieceHeight = rightArea->height() / gridSize;
-
-    // 使用网格位置计算像素坐标
-    int x = dropX * pieceWidth;
-    int y = dropY * pieceHeight;
-
-    // 绘制图片
-    QPainter painter(&currentPixmap);
-    painter.drawPixmap(x, y, pixmap.scaled(pieceWidth, pieceHeight, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-
-    // 更新显示
-    rightArea->setPixmap(currentPixmap);
-
-    // 检查这个位置是否是正确的位置（使用原始的行列位置）
-    if (dropX == originalPos.x() && dropY == originalPos.y()) {
-        correctPieces++;
-        if (correctPieces == gridSize * gridSize) {
-            QMessageBox::information(this, "完成", "恭喜你完成了拼图！");
+    } else if (event->type() == QEvent::DragEnter) {
+        // 允许在左侧区域内拖放
+        QDragEnterEvent *dragEvent = static_cast<QDragEnterEvent*>(event);
+        if (dragEvent->mimeData()->hasFormat("application/x-puzzle-piece")) {
+            dragEvent->acceptProposedAction();
         }
     }
-}
-
-bool ImagePuzzle::checkCompletion() {
-    // 由于我们在updateRightArea中已经处理了完成检查，这里可以简化
-    return false;
+    return QWidget::eventFilter(obj, event);
 }
